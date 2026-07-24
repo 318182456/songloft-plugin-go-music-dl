@@ -9,7 +9,7 @@
 
 在插件设置页填写：
 
-- **go-music-dl 实例地址**：例如 `http://127.0.0.1:8080/music`（默认端口8080）。
+- **go-music-dl 实例地址**：例如 `http://192.168.1.1:8080/music`（默认端口8080）。
 - **搜索音源**：勾选需要参与搜索的平台。
 
 ### MIoT 口令联动（可选）
@@ -38,4 +38,23 @@
 - go-music-dl 插件已安装且已启用。
 
 之后对小爱说「播放 XXX」即会经 go-music-dl 搜索歌曲并通过音箱出声。
+
+### 「不入库直接播放」与桥接插件（重要）
+
+MIoT 的 `external_search_no_import` 开关开启后，会把 `topone` 返回的 `url` 原样直推给音箱播放。
+该 `url` 由本插件的 `makeBridgeUrl` 生成，**是否可用取决于是否安装了桥接插件（songloft-plugin-bridge）**：
+
+- **已安装桥接插件**：`topone` 返回桥接插件的 LAN 直链（`http://<Bridge LAN>:<端口>/.../stream/go-music-dl/<token>`）。
+  音箱连桥接插件再回源到 go-music-dl，无论 MIoT 与音源是否同网段都能播放。
+  此时开启 `external_search_no_import` 即走「不入库直推」。
+- **未安装桥接插件**：`makeBridgeUrl` 不再回退为 go-music-dl 自有直链，而是让 `url` 置空。
+  MIoT 的「直链型」判定失败，**无论 `external_search_no_import` 开关开/关，都会回退到「入库播放」**
+  （走 `source_data` + 宿主 `/api/music/url` 服务端回源，音箱连的是 Songloft 自身可达地址，必能出声）。
+
+> 一句话：**没装桥接插件 → 一律入库播放（保证出声）；装了桥接插件 → 不入库直推才可生效。**
+> 这样可避免「开关开着、却因缺少桥接插件而直推无声」的问题。
+
+**桥接插件相关配置（如已安装）：**
+- 桥接插件需启用，并保证其 `server_host` 为局域网 IP，使音箱可直连。
+- 桥接缺失时无需任何额外操作，本插件自动降级为入库播放。
 

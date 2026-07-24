@@ -1,4 +1,11 @@
 import type { HTTPRequest, HTTPResponse } from '@songloft/plugin-sdk'
+import { getConfig } from './config'
+import { buildDownloadUrl } from './client'
+import {
+  ACTION_RESOLVE,
+  decodeToken,
+  loopbackToLan,
+} from './bridge-contract'
 import router from './router'
 
 // 向 miot 注册为「外部搜索源候选」（可选增强）。
@@ -41,6 +48,22 @@ async function onInit(): Promise<void> {
     )
   }
   registerSearchProviderToMiot()
+
+  // 注册 Bridge 回源解析：Bridge 用 token 问我们要真实直链，由它转发给音箱。
+  // 仅当 host 支持 comm 时注册；旧 host 静默跳过，功能零影响。
+  const comm = (globalThis as any).songloft?.comm
+  if (comm?.onMessage) {
+    comm.onMessage(ACTION_RESOLVE, async (payload: any) => {
+      const song = decodeToken<any>(payload?.token)
+      if (!song?.id || !song?.source) throw new Error('invalid stream token')
+      const config = await getConfig()
+      // 回环地址会被 Bridge 的 SSRF 检查拒绝，重写成本机 LAN 可达 IP。
+      const baseUrl = await loopbackToLan(config.baseUrl)
+      // stream=1：实时流，Bridge 会透传 Range 头给上游。
+      return { url: buildDownloadUrl(song, baseUrl, false) }
+    })
+    console.log('[Go Music DL Plugin] registered bridge resolve-stream-url')
+  }
 }
 
 async function onDeinit(): Promise<void> {

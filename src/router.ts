@@ -14,6 +14,7 @@ import {
   fetchLyric,
   GoSong,
 } from './client'
+import { encodeToken, ACTION_MAKE_URL, BRIDGE_SOURCE } from './bridge-contract'
 
 interface SongItem {
   id: string
@@ -326,11 +327,75 @@ router.post('/api/music/url', async (req: HTTPRequest) => {
   }
 })
 
+// 经 Bridge 统一回源：把歌曲打包成「音箱可直连的 Bridge URL」。
+// Bridge 未装 / 不可达时返回 null（不再回退到 go-music-dl 自有直链），
+// 上层 topone 会把 url 置空，让 miot 自动回退到「入库播放」，
+// 由宿主服务端经 /api/music/url 回源，音箱必可达。
+//
+// 注意：comm.call 跨插件返回的值可能已被序列化为字符串或包了信封，
+// 这里用 extractUrl 尽力取出 url，并打印诊断日志以便定位契约问题。
+function extractUrl(raw: unknown): string | null {
+  if (raw == null) return null
+  let obj: any = raw
+  if (typeof raw === 'string') {
+    // 有时直接返回裸 URL 字符串
+    if (/^https?:\/\//.test(raw)) return raw
+    try {
+      obj = JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  return obj?.url || obj?.result?.url || obj?.data?.url || obj?.response?.url || null
+}
+
+async function makeBridgeUrl(song: GoSong): Promise<string | null> {
+  try {
+    const comm = (globalThis as any).songloft?.comm
+    if (!comm?.call) throw new Error('no comm available')
+    const config = await getConfig()
+    // 把本插件已知的「可达 LAN host」带给桥接（如 192.168.1.190），
+    // 桥接用它 + 宿主端口拼出音箱可直连地址。回环地址（127.0.0.1）则不传。
+    let host = ''
+    try {
+      const h = new URL(config.baseUrl).host
+      host = h.split(':')[0]
+    } catch {
+      /* ignore */
+    }
+    if (host && /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(host)) host = ''
+    const token = encodeToken(song)
+    // 超时放宽到 30s：桥接首次调用可能因预加载/调度略慢，避免误判回退直链。
+    const raw = await comm.call('bridge', ACTION_MAKE_URL, {
+      source: BRIDGE_SOURCE,
+      token,
+      ...(host ? { host } : {}),
+    }, 30000)
+    console.log('[bridge] make-url raw response:', typeof raw, JSON.stringify(raw))
+    const url = extractUrl(raw)
+    if (!url) throw new Error('empty bridge url in response')
+    return url
+  } catch (e) {
+    // 桥接未装 / 不可达：不再回退成 go-music-dl 直链（音箱未必连得上），
+    // 返回 null，让上层 topone 把 url 置空 → miot 回退到入库播放
+    // （经 source_data + /api/music/url 由宿主服务端回源，音箱必可达）。
+    console.log(
+      '[bridge] make-url failed, force miot import:',
+      (e as Error)?.message || String(e),
+    )
+    return null
+  }
+}
+
 // 单首搜索端点（topone）：
 // 供 MIoT「智能音箱」插件的外部搜索源调用（相对路径 loopback，无需改 miot 代码）。
 // 契约兼容 OnlineSearcher：POST { keyword, hint?, quality? } → { code, msg, data }。
-// 返回解析型结果（不附直链），device 播放时宿主回源本插件 /api/music/url，
-// 避免临时 CDN 直链入库后失效。
+// 返回结果同时携带：
+// - url：桥接插件已装时为 Bridge 的 LAN 直链（音箱可直连）；
+//   miot 开启 external_search_no_import 时可据此「不入库直推」播放。
+//   桥接未装时此字段为空 → miot 不论开关都回退到「入库播放」。
+// - source_data：解析型兜底。miot 未开 no_import 或直链不可达时仍可入库，
+//   由宿主回源本插件 /api/music/url 播放。
 router.post('/api/search/topone', async (req: HTTPRequest) => {
   const body = parseBody(req)
   const keyword = String(body.keyword || '').trim()
@@ -344,6 +409,9 @@ router.post('/api/search/topone', async (req: HTTPRequest) => {
       return jsonResponse({ code: 1, msg: 'no result', data: null })
     }
     const s = songs[0]
+    // 桥接插件已装时返回其 LAN 直链（音箱可直连）；
+    // 桥接缺失时返回 null → url 置空 → miot 回退入库播放。
+    const directUrl = await makeBridgeUrl(s)
     return jsonResponse({
       code: 0,
       msg: 'ok',
@@ -353,6 +421,7 @@ router.post('/api/search/topone', async (req: HTTPRequest) => {
         album: s.album || '',
         duration: s.duration || 0,
         cover_url: s.cover || '',
+        url: directUrl || '',
         plugin_entry_path: 'go-music-dl',
         source_data: JSON.stringify({
           id: s.id,
