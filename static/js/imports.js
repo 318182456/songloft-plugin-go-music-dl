@@ -572,10 +572,15 @@ export async function importCollectionAsPlaylist(pl, songs) {
     
     if (!store.importPlaylists || !store.importPlaylists.length) {
       try {
-        store.importPlaylists = (await Host.playlists.list()) || []
+        const result = await Host.playlists.list()
+        // 与 loadImportPlaylists 保持一致：宿主可能直接返回数组，
+        // 也可能返回 { playlists: [...] } 对象。统一标准化为数组，
+        // 否则非数组对象会让下方 .find/.some/.push 抛 TypeError（被误报为网络异常）。
+        store.importPlaylists =
+          Array.isArray(result) ? result : (result && result.playlists) || []
       } catch (e) {}
     }
-    
+
     let playlist = (store.importPlaylists || []).find(
       (p) => p && p.name === name
     )
