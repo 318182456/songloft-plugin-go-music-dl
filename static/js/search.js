@@ -12,6 +12,85 @@ import { renderSong, scheduleInspect } from './songlist.js'
 import { parsePlaylists, renderPlaylistRow } from './playlists.js'
 import { setSelectMode } from './imports.js'
 
+const DERIVATIVE_KEYWORDS = [
+  'live', '演唱会', '伴奏', 'instrumental', 'inst', 'remix', 
+  'cover', '翻唱', 'dj', 'gai', '改编', '片段', '剪辑', '纯音乐', '钢琴', '伴奏版'
+]
+
+function sortSongsByRelevance(songs, keyword) {
+  const kw = (keyword || '').trim().toLowerCase()
+  if (!kw || !songs || !songs.length) return songs
+
+  const userWantsDerivative = DERIVATIVE_KEYWORDS.some(dk => kw.includes(dk))
+  const tokens = kw.split(/[\s的之与和&\/\-\_]+/).filter(Boolean)
+
+  const getScore = (song) => {
+    const name = (song.name || '').trim().toLowerCase()
+    const artist = (song.artist || '').trim().toLowerCase()
+    const album = (song.album || '').trim().toLowerCase()
+    if (!name) return 0
+
+    const combined = `${artist} ${name}`
+    const combinedAlt = `${name} ${artist}`
+
+    let score = 0
+
+    const kwContainsArtist = artist && artist.length >= 2 && kw.includes(artist)
+    const kwContainsName = name && name.length >= 1 && kw.includes(name)
+
+    const tokenMatchedArtist = tokens.some(t => t.length >= 2 && artist.includes(t))
+    const tokenMatchedName = tokens.some(t => t.length >= 1 && name.includes(t))
+
+    // A. 超高分：完美正版原唱！(检索词既包含歌手名，又包含歌名)
+    if ((kwContainsArtist && kwContainsName) || (tokenMatchedArtist && tokenMatchedName)) {
+      score = 1200
+      if (name === kw || combined.replace(/\s+/g, '') === kw.replace(/[\s的]+/g, '')) {
+        score += 500
+      } else if (kwContainsName && name.length >= 2) {
+        score += 300
+      }
+    }
+    // B. 精确匹配歌名或组合
+    else if (name === kw || combined === kw || combinedAlt === kw) {
+      score = 1000
+    }
+    // C. 歌名包含搜索词
+    else if (name.includes(kw)) {
+      score = 500
+    }
+    // D. 仅命中歌名
+    else if (kwContainsName || tokenMatchedName) {
+      score = 200
+    }
+    // E. 仅命中歌手
+    else if (kwContainsArtist || tokenMatchedArtist) {
+      score = 100
+    }
+
+    // 修饰词惩罚（Live、伴奏、Remix 降权）
+    if (!userWantsDerivative) {
+      const isDerivative = DERIVATIVE_KEYWORDS.some(
+        dk => name.includes(dk) || album.includes(dk)
+      )
+      if (isDerivative) {
+        score -= 250
+      }
+    }
+
+    // 干净标题微调
+    if (!/[\(\（\[\【].*?[\)\）\]\】]/.test(name)) {
+      score += 30
+    }
+
+    // 长度惩罚
+    score -= name.length * 0.1
+
+    return score
+  }
+
+  return [...songs].sort((a, b) => getScore(b) - getScore(a))
+}
+
 export async function doSearch(page = 1) {
   // 防御：点击搜索按钮时浏览器会传入 event 对象作为首个参数，需归一化回数字
   if (typeof page !== 'number' || isNaN(page) || page < 1) page = 1
@@ -35,15 +114,16 @@ export async function doSearch(page = 1) {
   document.getElementById('recommendCard').style.display = 'none'
   document.getElementById('listCard').style.display = 'block'
   try {
-    const data = await API.search(q, type, page)
+    let data = await API.search(q, type, page)
     // 兼容旧结构（数组）与新结构（{ type, items, pagination }）
-    const items = Array.isArray(data) ? data : data && data.items ? data.items : []
+    let items = Array.isArray(data) ? data : data && data.items ? data.items : []
     const pagination = Array.isArray(data) ? null : data && data.pagination
     if (!items.length) {
       list.innerHTML = '<div class="empty-state">未找到结果</div>'
       return
     }
     if (type === 'song') {
+      items = sortSongsByRelevance(items, q)
       store.queue = items
       list.innerHTML = ''
       const start = pagination ? pagination.pageStart : 1

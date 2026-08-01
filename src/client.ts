@@ -129,6 +129,87 @@ async function fetchSearchHtml(
   return fetchText(url)
 }
 
+// 常见衍生版本修饰词
+const DERIVATIVE_KEYWORDS = [
+  'live', '演唱会', '伴奏', 'instrumental', 'inst', 'remix', 
+  'cover', '翻唱', 'dj', 'gai', '改编', '片段', '剪辑', '纯音乐', '钢琴', '伴奏版'
+]
+
+// 排序辅助函数
+export function sortSongsByRelevance<T extends { name: string; artist: string; album?: string }>(songs: T[], keyword: string): T[] {
+  const kw = (keyword || '').trim().toLowerCase()
+  if (!kw || !songs || !songs.length) return songs
+
+  const userWantsDerivative = DERIVATIVE_KEYWORDS.some(dk => kw.includes(dk))
+  const tokens = kw.split(/[\s的之与和&\/\-\_]+/).filter(Boolean)
+
+  const getScore = (song: T): number => {
+    const name = (song.name || '').trim().toLowerCase()
+    const artist = (song.artist || '').trim().toLowerCase()
+    const album = (song.album || '').trim().toLowerCase()
+    if (!name) return 0
+
+    const combined = `${artist} ${name}`
+    const combinedAlt = `${name} ${artist}`
+
+    let score = 0
+
+    const kwContainsArtist = artist && artist.length >= 2 && kw.includes(artist)
+    const kwContainsName = name && name.length >= 1 && kw.includes(name)
+
+    const tokenMatchedArtist = tokens.some(t => t.length >= 2 && artist.includes(t))
+    const tokenMatchedName = tokens.some(t => t.length >= 1 && name.includes(t))
+
+    // A. 超高分：完美正版原唱！(检索词既包含歌手名，又包含歌名)
+    if ((kwContainsArtist && kwContainsName) || (tokenMatchedArtist && tokenMatchedName)) {
+      score = 1200
+      if (name === kw || combined.replace(/\s+/g, '') === kw.replace(/[\s的]+/g, '')) {
+        score += 500
+      } else if (kwContainsName && name.length >= 2) {
+        score += 300
+      }
+    }
+    // B. 精确匹配歌名或组合
+    else if (name === kw || combined === kw || combinedAlt === kw) {
+      score = 1000
+    }
+    // C. 歌名包含搜索词
+    else if (name.includes(kw)) {
+      score = 500
+    }
+    // D. 仅命中歌名
+    else if (kwContainsName || tokenMatchedName) {
+      score = 200
+    }
+    // E. 仅命中歌手
+    else if (kwContainsArtist || tokenMatchedArtist) {
+      score = 100
+    }
+
+    // 修饰词惩罚（Live、伴奏、Remix 降权）
+    if (!userWantsDerivative) {
+      const isDerivative = DERIVATIVE_KEYWORDS.some(
+        dk => name.includes(dk) || album.includes(dk)
+      )
+      if (isDerivative) {
+        score -= 250
+      }
+    }
+
+    // 干净标题微调
+    if (!/[\(\（\[\【].*?[\)\）\]\】]/.test(name)) {
+      score += 30
+    }
+
+    // 长度惩罚
+    score -= name.length * 0.1
+
+    return score
+  }
+
+  return [...songs].sort((a, b) => getScore(b) - getScore(a))
+}
+
 export async function searchSongs(
   keyword: string,
   config: GoMusicDlConfig,
@@ -136,8 +217,10 @@ export async function searchSongs(
   pageSize = 20,
 ): Promise<GoSong[]> {
   const html = await fetchSearchHtml(keyword, config, 'song', page, pageSize)
-  return parseSongCards(html)
+  const items = parseSongCards(html)
+  return sortSongsByRelevance(items, keyword)
 }
+
 
 /**
  * 分页元信息，对齐 go-music-dl 网页端的分页摘要。
@@ -180,14 +263,15 @@ export async function searchSongsPage(
 ): Promise<{ items: GoSong[]; pagination: Pagination }> {
   const html = await fetchSearchHtml(keyword, config, 'song', page, 0)
   const items = parseSongCards(html)
+  const sortedItems = sortSongsByRelevance(items, keyword)
   const pagination = parsePagination(html)
   // 摘要缺失时用当前页实际条数兜底，避免前端显示 0
-  if (pagination.total === 0 && items.length > 0) {
-    pagination.total = items.length
+  if (pagination.total === 0 && sortedItems.length > 0) {
+    pagination.total = sortedItems.length
     pagination.pageStart = 1
-    pagination.pageEnd = items.length
+    pagination.pageEnd = sortedItems.length
   }
-  return { items, pagination }
+  return { items: sortedItems, pagination }
 }
 
 export interface GoCollection {
