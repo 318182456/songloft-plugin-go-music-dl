@@ -404,7 +404,8 @@ router.post('/api/search/topone', async (req: HTTPRequest) => {
   }
   try {
     const config = await getConfig()
-    const songs = await searchSongs(keyword, config, 1, 1)
+    // 抓取前 20 条搜索结果，经 sortSongsByRelevance 打分重排序后取第一条最佳匹配
+    const songs = await searchSongs(keyword, config, 1, 20)
     if (!songs.length) {
       return jsonResponse({ code: 1, msg: 'no result', data: null })
     }
